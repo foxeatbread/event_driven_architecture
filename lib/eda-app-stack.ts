@@ -32,7 +32,15 @@ export class EDAAppStack extends cdk.Stack {
       },
     });
 
-
+    
+    // Dynamo DB table
+    const pictureTable = new dynamodb.Table(this, "PictureTable", {
+      partitionKey: { name: "pictureName", type: dynamodb.AttributeType.STRING },
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      tableName: "Pictures",
+      stream: StreamViewType.NEW_AND_OLD_IMAGES,
+    });
 
 
     // Lambda functions
@@ -70,10 +78,13 @@ export class EDAAppStack extends cdk.Stack {
       this,
       "ProcessDeleteFn",
       {
-        runtime: lambda.Runtime.NODEJS_18_X,
+        runtime: lambda.Runtime.NODEJS_16_X,
         entry: `${__dirname}/../lambdas/processDelete.ts`,
         timeout: cdk.Duration.seconds(15),
         memorySize: 128,
+        environment: {
+          DYNAMODB_TABLE_NAME: pictureTable.tableName,
+        },
       }
     );
 
@@ -99,17 +110,22 @@ export class EDAAppStack extends cdk.Stack {
     );
     newImageTopic.addSubscription(new subs.SqsSubscription(imageProcessQueue));
     deleteAndUpdateTopic.addSubscription(new subs.LambdaSubscription(processDeleteFn))
-  //   deleteAndUpdateTopic.addSubscription(new subs.LambdaSubscription(updateTableFn, {
-  //     filterPolicy: {
-  //         comment_type: sns.SubscriptionFilter.stringFilter({
-  //             allowlist: ['UpdateTable']
-  //         }),
-  //     }
-  // }))
+    //   deleteAndUpdateTopic.addSubscription(new subs.LambdaSubscription(updateTableFn, {
+    //     filterPolicy: {
+    //         comment_type: sns.SubscriptionFilter.stringFilter({
+    //             allowlist: ['UpdateTable']
+    //         }),
+    //     }
+    // }))
     // S3 --> SQS
     imagesBucket.addEventNotification(
       s3.EventType.OBJECT_CREATED,
       new s3n.SnsDestination(newImageTopic)
+    );
+
+    imagesBucket.addEventNotification(
+      s3.EventType.OBJECT_REMOVED_DELETE,
+      new s3n.SnsDestination(deleteAndUpdateTopic)
     );
 
 
@@ -122,6 +138,7 @@ export class EDAAppStack extends cdk.Stack {
     );
 
 
+
     // DLQ --> Lambda
     rejectionMailerFn.addEventSource(
       new events.SqsEventSource(imageProcessDLQ, {
@@ -129,7 +146,6 @@ export class EDAAppStack extends cdk.Stack {
         maxBatchingWindow: cdk.Duration.seconds(10),
       })
     );
-
 
     // Permissions
 
@@ -167,14 +183,13 @@ export class EDAAppStack extends cdk.Stack {
       })
     );
 
-    // Dynamo DB table
-    const pictureTable = new dynamodb.Table(this, "PictureTable", {
-      partitionKey: { name: "pictureName", type: dynamodb.AttributeType.STRING },
-      removalPolicy: cdk.RemovalPolicy.DESTROY,
-      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
-      tableName: "Pictures",
-      stream: StreamViewType.NEW_AND_OLD_IMAGES,
-    });
+    processDeleteFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["dynamodb:DeleteItem"],
+        resources: [pictureTable.tableArn],
+      })
+    );
 
 
     // Dynamo DB Permissions
@@ -186,6 +201,9 @@ export class EDAAppStack extends cdk.Stack {
     // Output
     new cdk.CfnOutput(this, "bucketName", {
       value: imagesBucket.bucketName,
+    });
+    new cdk.CfnOutput(this, "deleteAndUpdateTopicARN", {
+      value: deleteAndUpdateTopic.topicArn,
     });
   }
 }
