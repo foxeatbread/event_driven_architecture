@@ -8,6 +8,8 @@ import * as sqs from "aws-cdk-lib/aws-sqs";
 import * as sns from "aws-cdk-lib/aws-sns";
 import * as subs from "aws-cdk-lib/aws-sns-subscriptions";
 import * as iam from "aws-cdk-lib/aws-iam";
+import * as dynamodb from "aws-cdk-lib/aws-dynamodb";
+import { StreamViewType } from "aws-cdk-lib/aws-dynamodb";
 
 import { Construct } from "constructs";
 // import * as sqs from 'aws-cdk-lib/aws-sqs';
@@ -21,17 +23,18 @@ export class EDAAppStack extends cdk.Stack {
       autoDeleteObjects: true,
       publicReadAccess: false,
     });
-
+    const imageProcessDLQ = new sqs.Queue(this, 'img-created-dlq', { receiveMessageWaitTime: cdk.Duration.seconds(10), });
     const imageProcessQueue = new sqs.Queue(this, "img-created-queue", {
       receiveMessageWaitTime: cdk.Duration.seconds(10),
+      deadLetterQueue: {
+        queue: imageProcessDLQ,
+        maxReceiveCount: 3
+      },
     });
-    const newImageTopic = new sns.Topic(this, "NewImageTopic", {
-      displayName: "New Image topic",
-    }); 
 
-    const mailerQ = new sqs.Queue(this, "mailer-queue", {
-      receiveMessageWaitTime: cdk.Duration.seconds(10),
-    });
+
+
+
     // Lambda functions
 
     const processImageFn = new lambdanode.NodejsFunction(
@@ -45,21 +48,95 @@ export class EDAAppStack extends cdk.Stack {
       }
     );
 
-    const mailerFn = new lambdanode.NodejsFunction(this, "mailer-function", {
+    const confirmationMailerFn = new lambdanode.NodejsFunction(this, "confirmationMailer-function", {
       runtime: lambda.Runtime.NODEJS_16_X,
       memorySize: 1024,
       timeout: cdk.Duration.seconds(3),
       entry: `${__dirname}/../lambdas/mailer.ts`,
     });
-    newImageTopic.addSubscription(new subs.SqsSubscription(mailerQ));
 
-    const newImageMailEventSource = new events.SqsEventSource(mailerQ, {
-      batchSize: 5,
-      maxBatchingWindow: cdk.Duration.seconds(10),
-    }); 
-    mailerFn.addEventSource(newImageMailEventSource);
+    const rejectionMailerFn = new lambdanode.NodejsFunction(
+      this,
+      "RejectionMailerFunction",
+      {
+        runtime: lambda.Runtime.NODEJS_16_X,
+        entry: `${__dirname}/../lambdas/rejectionMailer.ts`,
+        timeout: cdk.Duration.seconds(3),
+        memorySize: 1024,
+      }
+    );
 
-    mailerFn.addToRolePolicy(
+    const processDeleteFn = new lambdanode.NodejsFunction(
+      this,
+      "ProcessDeleteFn",
+      {
+        runtime: lambda.Runtime.NODEJS_18_X,
+        entry: `${__dirname}/../lambdas/processDelete.ts`,
+        timeout: cdk.Duration.seconds(15),
+        memorySize: 128,
+      }
+    );
+
+    const updateTableFn = new lambdanode.NodejsFunction(this, "updateTableFn", {
+      runtime: lambda.Runtime.NODEJS_18_X,
+      entry: `${__dirname}/../lambdas/updateTable.ts`,
+      timeout: cdk.Duration.seconds(15),
+      memorySize: 128,
+      environment: {
+        DYNAMODB_TABLE_NAME: "Pictures",
+      },
+    });
+    //Topics
+    const newImageTopic = new sns.Topic(this, "NewImageTopic", {
+      displayName: "New Image topic",
+    });
+    const deleteAndUpdateTopic = new sns.Topic(this, "DeleteAndUpdateTopic", {
+      displayName: "Delete and Update Topic",
+    });
+
+    newImageTopic.addSubscription(
+      new subs.LambdaSubscription(confirmationMailerFn)
+    );
+    newImageTopic.addSubscription(new subs.SqsSubscription(imageProcessQueue));
+    deleteAndUpdateTopic.addSubscription(new subs.LambdaSubscription(processDeleteFn))
+    // S3 --> SQS
+    imagesBucket.addEventNotification(
+      s3.EventType.OBJECT_CREATED,
+      new s3n.SnsDestination(newImageTopic)
+    );
+
+
+    // SQS --> Lambda
+    processImageFn.addEventSource(
+      new events.SqsEventSource(imageProcessQueue, {
+        batchSize: 5,
+        maxBatchingWindow: cdk.Duration.seconds(10),
+      })
+    );
+
+
+    // DLQ --> Lambda
+    rejectionMailerFn.addEventSource(
+      new events.SqsEventSource(imageProcessDLQ, {
+        batchSize: 5,
+        maxBatchingWindow: cdk.Duration.seconds(10),
+      })
+    );
+
+
+    // Permissions
+
+    imagesBucket.grantRead(processImageFn);
+
+    processImageFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["sqs:SendMessage"],
+        resources: [imageProcessDLQ.queueArn],
+      })
+    );
+
+    confirmationMailerFn.addToRolePolicy(
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
         actions: [
@@ -70,32 +147,43 @@ export class EDAAppStack extends cdk.Stack {
         resources: ["*"],
       })
     );
-   // S3 --> SQS
-    imagesBucket.addEventNotification(
-      s3.EventType.OBJECT_CREATED,
-      new s3n.SnsDestination(newImageTopic)  // Changed
-    );
-    newImageTopic.addSubscription(
-      new subs.SqsSubscription(imageProcessQueue)
+
+    rejectionMailerFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: [
+          "ses:SendEmail",
+          "ses:SendRawEmail",
+          "ses:SendTemplatedEmail",
+        ],
+        resources: ["*"],
+      })
     );
 
-   // SQS --> Lambda
-    const newImageEventSource = new events.SqsEventSource(imageProcessQueue, {
-      batchSize: 5,
-      maxBatchingWindow: cdk.Duration.seconds(10),
+    // Dynamo DB table
+    const pictureTable = new dynamodb.Table(this, "PictureTable", {
+      partitionKey: { name: "pictureName", type: dynamodb.AttributeType.STRING },
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      tableName: "Pictures",
+      stream: StreamViewType.NEW_AND_OLD_IMAGES,
     });
 
-    processImageFn.addEventSource(newImageEventSource);
 
-    // Permissions
+    // Dynamo DB Permissions
+    processImageFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["dynamodb:PutItem", "dynamodb:GetItem"],
+        resources: [pictureTable.tableArn],
+      })
+    );
 
-    imagesBucket.grantRead(processImageFn);
-
-    // Output
-
-    
     new cdk.CfnOutput(this, "bucketName", {
       value: imagesBucket.bucketName,
     });
+
+    pictureTable.grantReadWriteData(processDeleteFn)
+    // Output
   }
 }

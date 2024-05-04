@@ -1,4 +1,4 @@
-import { SQSHandler } from "aws-lambda";
+import { SNSHandler } from "aws-lambda";
 // import AWS from 'aws-sdk';
 import { SES_EMAIL_FROM, SES_EMAIL_TO, SES_REGION } from "../env";
 import {
@@ -19,13 +19,12 @@ type ContactDetails = {
   message: string;
 };
 
-const client = new SESClient({ region: SES_REGION});
+const client = new SESClient({ region: SES_REGION });
 
-export const handler: SQSHandler = async (event: any) => {
-  console.log("Event ", JSON.stringify(event));
+export const handler: SNSHandler = async (event: any) => {
+  console.log("Event ",event);
   for (const record of event.Records) {
-    const recordBody = JSON.parse(record.body);
-    const snsMessage = JSON.parse(recordBody.Message);
+    const snsMessage = JSON.parse(record.Sns.Message);
 
     if (snsMessage.Records) {
       console.log("Record body ", JSON.stringify(snsMessage));
@@ -89,16 +88,5 @@ function getHtmlContent({ name, email, message }: ContactDetails) {
         <p style="font-size:18px">${message}</p>
       </body>
     </html> 
-  `;
-}
-
- // For demo purposes - not used here.
-function getTextContent({ name, email, message }: ContactDetails) {
-  return `
-    Received an Email. 📬
-    Sent from:
-        👤 ${name}
-        ✉️ ${email}
-    ${message}
   `;
 }
