@@ -11,8 +11,8 @@ export const handler: SNSHandler = async (event) => {
     const messageDescription = message.description;
 
     const updateCommand = new UpdateCommand({
-        TableName: "Images",
-        Key: { ImageName: messageName },
+        TableName: "Pictures",
+        Key: { pictureName: messageName },
         UpdateExpression: "SET Description = :d",
         ExpressionAttributeValues: {
             ":d": messageDescription },
