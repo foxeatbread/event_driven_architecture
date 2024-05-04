@@ -77,15 +77,15 @@ export class EDAAppStack extends cdk.Stack {
       }
     );
 
-    const updateTableFn = new lambdanode.NodejsFunction(this, "updateTableFn", {
-      runtime: lambda.Runtime.NODEJS_18_X,
-      entry: `${__dirname}/../lambdas/updateTable.ts`,
-      timeout: cdk.Duration.seconds(15),
-      memorySize: 128,
-      environment: {
-        DYNAMODB_TABLE_NAME: "Pictures",
-      },
-    });
+    // const updateTableFn = new lambdanode.NodejsFunction(this, "updateTableFn", {
+    //   runtime: lambda.Runtime.NODEJS_18_X,
+    //   entry: `${__dirname}/../lambdas/updateTable.ts`,
+    //   timeout: cdk.Duration.seconds(15),
+    //   memorySize: 128,
+    //   environment: {
+    //     DYNAMODB_TABLE_NAME: "Pictures",
+    //   },
+    // });
     //Topics
     const newImageTopic = new sns.Topic(this, "NewImageTopic", {
       displayName: "New Image topic",
@@ -99,6 +99,13 @@ export class EDAAppStack extends cdk.Stack {
     );
     newImageTopic.addSubscription(new subs.SqsSubscription(imageProcessQueue));
     deleteAndUpdateTopic.addSubscription(new subs.LambdaSubscription(processDeleteFn))
+  //   deleteAndUpdateTopic.addSubscription(new subs.LambdaSubscription(updateTableFn, {
+  //     filterPolicy: {
+  //         comment_type: sns.SubscriptionFilter.stringFilter({
+  //             allowlist: ['UpdateTable']
+  //         }),
+  //     }
+  // }))
     // S3 --> SQS
     imagesBucket.addEventNotification(
       s3.EventType.OBJECT_CREATED,
@@ -171,19 +178,14 @@ export class EDAAppStack extends cdk.Stack {
 
 
     // Dynamo DB Permissions
-    processImageFn.addToRolePolicy(
-      new iam.PolicyStatement({
-        effect: iam.Effect.ALLOW,
-        actions: ["dynamodb:PutItem", "dynamodb:GetItem"],
-        resources: [pictureTable.tableArn],
-      })
-    );
+    processImageFn.addEnvironment("Pictures", pictureTable.tableName);
+    pictureTable.grantReadWriteData(processDeleteFn)
+    pictureTable.grantReadWriteData(processImageFn);
 
+
+    // Output
     new cdk.CfnOutput(this, "bucketName", {
       value: imagesBucket.bucketName,
     });
-
-    pictureTable.grantReadWriteData(processDeleteFn)
-    // Output
   }
 }
